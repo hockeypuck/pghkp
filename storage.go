@@ -95,6 +95,10 @@ func New(db *sql.DB) (hkpstorage.Storage, error) {
 	if err != nil {
 		return nil, errgo.Mask(err)
 	}
+	_, err = st.Exec("CREATE CAST (TEXT AS JSONB) WITHOUT FUNCTION AS IMPLICIT;")
+	if err != nil {
+		return nil, errgo.Mask(err)
+	}
 	st.createIndexes()
 	return st, nil
 }
@@ -136,9 +140,8 @@ func (st *storage) MatchMD5(md5s []string) ([]string, error) {
 		md5In = append(md5In, "'"+strings.ToLower(md5)+"'")
 	}
 
-	sql := fmt.Sprintf("SELECT rfingerprint FROM keys WHERE md5 IN (%s)", strings.Join(md5In, ","))
-	log.Errorf(sql)
-	rows, err := st.Query(sql)
+	sqlStr := fmt.Sprintf("SELECT rfingerprint FROM keys WHERE md5 IN (%s)", strings.Join(md5In, ","))
+	rows, err := st.Query(sqlStr)
 	if err != nil {
 		return nil, errgo.Mask(err)
 	}
@@ -148,7 +151,7 @@ func (st *storage) MatchMD5(md5s []string) ([]string, error) {
 	for rows.Next() {
 		var rfp string
 		err := rows.Scan(&rfp)
-		if err != nil {
+		if err != nil && err != sql.ErrNoRows {
 			return nil, errgo.Mask(err)
 		}
 		result = append(result, rfp)
@@ -164,9 +167,10 @@ func (st *storage) MatchMD5(md5s []string) ([]string, error) {
 //
 // Only v4 key IDs are resolved by this backend. v3 short and long key IDs
 // currently won't match.
-func (st *storage) Resolve(keyids []string) ([]string, error) {
+func (st *storage) Resolve(keyids []string) (_ []string, retErr error) {
 	var result []string
-	stmt, err := st.Prepare("SELECT rfingerprint FROM keys WHERE rfingerprint LIKE $1 || '%'")
+	sqlStr := "SELECT rfingerprint FROM keys WHERE rfingerprint LIKE $1 || '%'"
+	stmt, err := st.Prepare(sqlStr)
 	if err != nil {
 		return nil, errgo.Mask(err)
 	}
@@ -178,7 +182,7 @@ func (st *storage) Resolve(keyids []string) ([]string, error) {
 			var rfp string
 			row := stmt.QueryRow(keyid)
 			err = row.Scan(&rfp)
-			if err != nil {
+			if err != nil && err != sql.ErrNoRows {
 				return nil, errgo.Mask(err)
 			}
 			result = append(result, rfp)
@@ -190,7 +194,7 @@ func (st *storage) Resolve(keyids []string) ([]string, error) {
 	return result, nil
 }
 
-func (st *storage) MatchKeyword(keywords []string) ([]string, error) {
+func (st *storage) MatchKeyword(search []string) ([]string, error) {
 	var result []string
 	stmt, err := st.Prepare("SELECT rfingerprint FROM keys WHERE keywords @@ to_tsquery($1) LIMIT $2")
 	if err != nil {
@@ -198,18 +202,18 @@ func (st *storage) MatchKeyword(keywords []string) ([]string, error) {
 	}
 	defer stmt.Close()
 
-	for _, keyword := range keywords {
-		keyword = strings.ToLower(keyword)
+	for _, term := range search {
+		term = strings.Join(strings.Split(strings.ToLower(term), " "), " & ")
 		err = func() error {
-			rows, err := stmt.Query(keyword, 100)
-			defer rows.Close()
+			rows, err := stmt.Query(term, 100)
 			if err != nil {
 				return errgo.Mask(err)
 			}
+			defer rows.Close()
 			for rows.Next() {
 				var rfp string
 				err = rows.Scan(&rfp)
-				if err != nil {
+				if err != nil && err != sql.ErrNoRows {
 					return errgo.Mask(err)
 				}
 				result = append(result, rfp)
@@ -237,7 +241,7 @@ func (st *storage) ModifiedSince(t time.Time) ([]string, error) {
 	for rows.Next() {
 		var rfp string
 		err = rows.Scan(&rfp)
-		if err != nil {
+		if err != nil && err != sql.ErrNoRows {
 			return nil, errgo.Mask(err)
 		}
 		result = append(result, rfp)
@@ -262,9 +266,8 @@ func (st *storage) FetchKeys(rfps []string) ([]*openpgp.PrimaryKey, error) {
 		}
 		rfpIn = append(rfpIn, "'"+strings.ToLower(rfp)+"'")
 	}
-	sql := fmt.Sprintf("SELECT doc FROM keys WHERE rfingerprint IN (%s)", strings.Join(rfpIn, ","))
-	log.Errorf(sql)
-	rows, err := st.Query(sql)
+	sqlStr := fmt.Sprintf("SELECT doc FROM keys WHERE rfingerprint IN (%s)", strings.Join(rfpIn, ","))
+	rows, err := st.Query(sqlStr)
 	if err != nil {
 		return nil, errgo.Mask(err)
 	}
@@ -273,7 +276,7 @@ func (st *storage) FetchKeys(rfps []string) ([]*openpgp.PrimaryKey, error) {
 	for rows.Next() {
 		var bufStr string
 		err = rows.Scan(&bufStr)
-		if err != nil {
+		if err != nil && err != sql.ErrNoRows {
 			return nil, errgo.Mask(err)
 		}
 		var pk jsonhkp.PrimaryKey
@@ -281,7 +284,13 @@ func (st *storage) FetchKeys(rfps []string) ([]*openpgp.PrimaryKey, error) {
 		if err != nil {
 			return nil, errgo.Mask(err)
 		}
-		rfp := openpgp.Reverse(pk.Fingerprint)
+
+		fpFields := strings.Split(pk.Fingerprint, "/")
+		if len(fpFields) < 2 {
+			return nil, errgo.Newf("invalid fingerprint %q", pk.Fingerprint)
+		}
+
+		rfp := openpgp.Reverse(fpFields[1])
 		key, err := readOneKey(pk.Bytes(), rfp)
 		if err != nil {
 			return nil, errgo.Mask(err)
@@ -305,8 +314,8 @@ func (st *storage) FetchKeyrings(rfps []string) ([]*hkpstorage.Keyring, error) {
 		}
 		rfpIn = append(rfpIn, "'"+strings.ToLower(rfp)+"'")
 	}
-	sql := fmt.Sprintf("SELECT ctime, mtime, doc FROM keys WHERE rfingerprint IN (%s)", strings.Join(rfpIn, ","))
-	rows, err := st.Query(sql)
+	sqlStr := fmt.Sprintf("SELECT ctime, mtime, doc FROM keys WHERE rfingerprint IN (%s)", strings.Join(rfpIn, ","))
+	rows, err := st.Query(sqlStr)
 	if err != nil {
 		return nil, errgo.Mask(err)
 	}
@@ -316,7 +325,7 @@ func (st *storage) FetchKeyrings(rfps []string) ([]*hkpstorage.Keyring, error) {
 		var bufStr string
 		var kr hkpstorage.Keyring
 		err = rows.Scan(&bufStr, &kr.CTime, &kr.MTime)
-		if err != nil {
+		if err != nil && err != sql.ErrNoRows {
 			return nil, errgo.Mask(err)
 		}
 		var pk jsonhkp.PrimaryKey
@@ -324,7 +333,13 @@ func (st *storage) FetchKeyrings(rfps []string) ([]*hkpstorage.Keyring, error) {
 		if err != nil {
 			return nil, errgo.Mask(err)
 		}
-		rfp := openpgp.Reverse(pk.Fingerprint)
+
+		fpFields := strings.Split(pk.Fingerprint, "/")
+		if len(fpFields) < 2 {
+			return nil, errgo.Newf("invalid fingerprint %q", pk.Fingerprint)
+		}
+
+		rfp := openpgp.Reverse(fpFields[1])
 		key, err := readOneKey(pk.Bytes(), rfp)
 		if err != nil {
 			return nil, errgo.Mask(err)
@@ -377,7 +392,8 @@ func (st *storage) Insert(keys []*openpgp.PrimaryKey) (retErr error) {
 	}()
 
 	stmt, err := tx.Prepare("INSERT INTO keys (rfingerprint, ctime, mtime, md5, doc, keywords) " +
-		"VALUES ($1, $2, $3, $4, $5, to_tsvector($6))")
+		"SELECT $1::TEXT, $2::TIMESTAMP, $3::TIMESTAMP, $4::TEXT, $5::JSONB, to_tsvector($6) " +
+		"WHERE NOT EXISTS (SELECT 1 FROM keys WHERE rfingerprint = $1)")
 	if err != nil {
 		return errgo.Mask(err)
 	}
@@ -389,8 +405,9 @@ func (st *storage) Insert(keys []*openpgp.PrimaryKey) (retErr error) {
 		now := time.Now().UTC()
 		jsonKey := jsonhkp.NewPrimaryKey(key)
 		jsonBuf, err := json.Marshal(jsonKey)
+		jsonStr := string(jsonBuf)
 		keyword := strings.Join(keywords(key), " & ")
-		_, err = stmt.Exec(&key.RFingerprint, &now, &now, &key.MD5, jsonBuf, &keyword)
+		_, err = stmt.Exec(&key.RFingerprint, &now, &now, &key.MD5, &jsonStr, &keyword)
 		if err != nil {
 			return errgo.Mask(err)
 		}
