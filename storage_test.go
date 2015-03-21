@@ -20,6 +20,7 @@ package pghkp
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +33,7 @@ import (
 	gc "gopkg.in/check.v1"
 
 	"gopkg.in/hockeypuck/hkp.v0"
+	"gopkg.in/hockeypuck/hkp.v0/jsonhkp"
 	"gopkg.in/hockeypuck/openpgp.v0"
 )
 
@@ -87,6 +89,28 @@ func (s *S) addKey(c *gc.C, keyname string) {
 	c.Assert(err, gc.IsNil)
 }
 
+func (s *S) queryAllKeys(c *gc.C) []*keyDoc {
+	rows, err := s.db.Query("SELECT rfingerprint, ctime, mtime, md5, doc FROM keys")
+	c.Assert(err, gc.IsNil)
+	defer rows.Close()
+	var result []*keyDoc
+	for rows.Next() {
+		var doc keyDoc
+		err = rows.Scan(&doc.RFingerprint, &doc.CTime, &doc.MTime, &doc.MD5, &doc.Doc)
+		c.Assert(err, gc.IsNil)
+		result = append(result, &doc)
+	}
+	c.Assert(rows.Err(), gc.IsNil)
+	return result
+}
+
+func (d *keyDoc) assertParse(c *gc.C) *jsonhkp.PrimaryKey {
+	var pk jsonhkp.PrimaryKey
+	err := json.Unmarshal([]byte(d.Doc), &pk)
+	c.Assert(err, gc.IsNil)
+	return &pk
+}
+
 func (s *S) TestMD5(c *gc.C) {
 	res, err := http.Get(s.srv.URL + "/pks/lookup?op=hget&search=da84f40d830a7be2a3c0b7f2e146bfaa")
 	c.Assert(err, gc.IsNil)
@@ -95,13 +119,12 @@ func (s *S) TestMD5(c *gc.C) {
 	c.Assert(res.StatusCode, gc.Equals, http.StatusNotFound)
 
 	s.addKey(c, "sksdigest.asc")
-	/*
-		session, coll := s.storage.c()
-		defer session.Close()
-		var doc keyDoc
-		err = coll.Find(bson.D{{"md5", "da84f40d830a7be2a3c0b7f2e146bfaa"}}).One(&doc)
-		c.Assert(err, gc.IsNil)
-	*/
+
+	keyDocs := s.queryAllKeys(c)
+	c.Assert(keyDocs, gc.HasLen, 1)
+	c.Assert(keyDocs[0].MD5, gc.Equals, "da84f40d830a7be2a3c0b7f2e146bfaa")
+	jsonDoc := keyDocs[0].assertParse(c)
+	c.Assert(jsonDoc.MD5, gc.Equals, "da84f40d830a7be2a3c0b7f2e146bfaa")
 
 	res, err = http.Get(s.srv.URL + "/pks/lookup?op=hget&search=da84f40d830a7be2a3c0b7f2e146bfaa")
 	c.Assert(err, gc.IsNil)
@@ -128,13 +151,9 @@ func (s *S) TestAddDuplicates(c *gc.C) {
 		s.addKey(c, "sksdigest.asc")
 	}
 
-	/*
-		session, coll := s.storage.c()
-		defer session.Close()
-		n, err := coll.Find(bson.D{{"md5", "da84f40d830a7be2a3c0b7f2e146bfaa"}}).Count()
-		c.Assert(err, gc.IsNil)
-		c.Assert(n, gc.Equals, 1)
-	*/
+	keyDocs := s.queryAllKeys(c)
+	c.Assert(keyDocs, gc.HasLen, 1)
+	c.Assert(keyDocs[0].MD5, gc.Equals, "da84f40d830a7be2a3c0b7f2e146bfaa")
 }
 
 func (s *S) TestResolve(c *gc.C) {
@@ -145,13 +164,10 @@ func (s *S) TestResolve(c *gc.C) {
 	c.Assert(res.StatusCode, gc.Equals, http.StatusNotFound)
 
 	s.addKey(c, "uat.asc")
-	/*
-		var doc keyDoc
-		session, coll := s.storage.c()
-		defer session.Close()
-		err = coll.Find(nil).One(&doc)
-		c.Assert(err, gc.IsNil)
-	*/
+
+	keyDocs := s.queryAllKeys(c)
+	c.Assert(keyDocs, gc.HasLen, 1)
+	c.Assert(keyDocs[0].assertParse(c).ShortKeyID, gc.Equals, "44a2d1db")
 
 	// Should match
 	for _, search := range []string{
@@ -196,13 +212,8 @@ func (s *S) TestMerge(c *gc.C) {
 	s.addKey(c, "alice_unsigned.asc")
 	s.addKey(c, "alice_signed.asc")
 
-	/*
-		session, coll := s.storage.c()
-		defer session.Close()
-		n, err := coll.Find(nil).Count()
-		c.Assert(err, gc.IsNil)
-		c.Assert(n, gc.Equals, 1)
-	*/
+	keyDocs := s.queryAllKeys(c)
+	c.Assert(keyDocs, gc.HasLen, 1)
 
 	res, err := http.Get(s.srv.URL + "/pks/lookup?op=get&search=alice@example.com")
 	c.Assert(err, gc.IsNil)

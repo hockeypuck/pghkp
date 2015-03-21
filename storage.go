@@ -122,8 +122,8 @@ func (st *storage) createIndexes() {
 
 type keyDoc struct {
 	RFingerprint string
-	CTime        int64
-	MTime        int64
+	CTime        time.Time
+	MTime        time.Time
 	MD5          string
 	Doc          string
 	Keywords     []string
@@ -378,10 +378,10 @@ func readOneKey(b []byte, rfingerprint string) (*openpgp.PrimaryKey, error) {
 	return result, nil
 }
 
-func (st *storage) Insert(keys []*openpgp.PrimaryKey) (retErr error) {
+func (st *storage) Insert(keys []*openpgp.PrimaryKey) (n int, retErr error) {
 	tx, err := st.Begin()
 	if err != nil {
-		return errgo.Mask(err)
+		return 0, errgo.Mask(err)
 	}
 	defer func() {
 		if retErr != nil {
@@ -395,28 +395,39 @@ func (st *storage) Insert(keys []*openpgp.PrimaryKey) (retErr error) {
 		"SELECT $1::TEXT, $2::TIMESTAMP, $3::TIMESTAMP, $4::TEXT, $5::JSONB, to_tsvector($6) " +
 		"WHERE NOT EXISTS (SELECT 1 FROM keys WHERE rfingerprint = $1)")
 	if err != nil {
-		return errgo.Mask(err)
+		return 0, errgo.Mask(err)
 	}
 	defer stmt.Close()
 
+	var result hkpstorage.InsertError
 	for _, key := range keys {
 		openpgp.Sort(key)
 
 		now := time.Now().UTC()
 		jsonKey := jsonhkp.NewPrimaryKey(key)
 		jsonBuf, err := json.Marshal(jsonKey)
+		if err != nil {
+			result.Errors = append(result.Errors, errgo.Notef(err, "cannot serialize rfp=%q", key.RFingerprint))
+			continue
+		}
+
 		jsonStr := string(jsonBuf)
 		keyword := strings.Join(keywords(key), " & ")
 		_, err = stmt.Exec(&key.RFingerprint, &now, &now, &key.MD5, &jsonStr, &keyword)
 		if err != nil {
-			return errgo.Mask(err)
+			result.Errors = append(result.Errors, errgo.Notef(err, "cannot insert rfp=%q", key.RFingerprint))
+			continue
 		}
 		st.Notify(hkpstorage.KeyAdded{
 			Digest: key.MD5,
 		})
+		n++
 	}
 
-	return nil
+	if len(result.Duplicates) > 0 || len(result.Errors) > 0 {
+		return n, result
+	}
+	return n, nil
 }
 
 func (st *storage) Update(key *openpgp.PrimaryKey, lastMD5 string) (retErr error) {
@@ -507,4 +518,31 @@ func (st *storage) Notify(change hkpstorage.KeyChange) error {
 		f(change)
 	}
 	return nil
+}
+
+func (st *storage) RenotifyAll() error {
+	var result struct {
+		MD5 string `bson:"md5"`
+	}
+
+	sqlStr := fmt.Sprintf("SELECT md5 FROM keys")
+	rows, err := st.Query(sqlStr)
+	if err != nil {
+		return errgo.Mask(err)
+	}
+
+	defer rows.Close()
+	for rows.Next() {
+		err := rows.Scan(&result)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return nil
+			} else {
+				return errgo.Mask(err)
+			}
+		}
+		st.Notify(hkpstorage.KeyAdded{Digest: result.MD5})
+	}
+	err = rows.Err()
+	return errgo.Mask(err)
 }
