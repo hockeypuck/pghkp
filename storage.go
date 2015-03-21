@@ -95,10 +95,6 @@ func New(db *sql.DB) (hkpstorage.Storage, error) {
 	if err != nil {
 		return nil, errgo.Mask(err)
 	}
-	_, err = st.Exec("CREATE CAST (TEXT AS JSONB) WITHOUT FUNCTION AS IMPLICIT;")
-	if err != nil {
-		return nil, errgo.Mask(err)
-	}
 	st.createIndexes()
 	return st, nil
 }
