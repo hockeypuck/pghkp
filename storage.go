@@ -281,12 +281,7 @@ func (st *storage) FetchKeys(rfps []string) ([]*openpgp.PrimaryKey, error) {
 			return nil, errgo.Mask(err)
 		}
 
-		fpFields := strings.Split(pk.Fingerprint, "/")
-		if len(fpFields) < 2 {
-			return nil, errgo.Newf("invalid fingerprint %q", pk.Fingerprint)
-		}
-
-		rfp := openpgp.Reverse(fpFields[1])
+		rfp := openpgp.Reverse(pk.Fingerprint)
 		key, err := readOneKey(pk.Bytes(), rfp)
 		if err != nil {
 			return nil, errgo.Mask(err)
@@ -330,12 +325,7 @@ func (st *storage) FetchKeyrings(rfps []string) ([]*hkpstorage.Keyring, error) {
 			return nil, errgo.Mask(err)
 		}
 
-		fpFields := strings.Split(pk.Fingerprint, "/")
-		if len(fpFields) < 2 {
-			return nil, errgo.Newf("invalid fingerprint %q", pk.Fingerprint)
-		}
-
-		rfp := openpgp.Reverse(fpFields[1])
+		rfp := openpgp.Reverse(pk.Fingerprint)
 		key, err := readOneKey(pk.Bytes(), rfp)
 		if err != nil {
 			return nil, errgo.Mask(err)
