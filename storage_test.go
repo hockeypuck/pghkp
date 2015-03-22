@@ -174,8 +174,8 @@ func (s *S) TestResolve(c *gc.C) {
 		// short, long and full fingerprint key IDs match
 		"0x44a2d1db", "0xf79362da44a2d1db", "0x81279eee7ec89fb781702adaf79362da44a2d1db",
 
-		// TODO: support subkeys
-		//"0xdb769d16cdb9ad53", "0xe9ebaf4195c1826c", "0x6cdc23d76cba8ca9",
+		// subkeys
+		"0xdb769d16cdb9ad53", "0xe9ebaf4195c1826c", "0x6cdc23d76cba8ca9",
 
 		// contiguous words and email addresses match
 		"casey", "marshall", "marshal", "casey+marshall", "cAseY+MArSHaLL",

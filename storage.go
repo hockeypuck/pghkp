@@ -52,30 +52,45 @@ type storage struct {
 
 var _ hkpstorage.Storage = (*storage)(nil)
 
-var crTableSQL = `CREATE TABLE IF NOT EXISTS keys (
-	rfingerprint TEXT NOT NULL,
-	doc jsonb NOT NULL,
-	ctime TIMESTAMP WITH TIME ZONE NOT NULL,
-	mtime TIMESTAMP WITH TIME ZONE NOT NULL,
-	md5 TEXT NOT NULL,
-	keywords tsvector
-)`
+var crTablesSQL = []string{
+	`CREATE TABLE IF NOT EXISTS keys (
+rfingerprint TEXT NOT NULL,
+doc jsonb NOT NULL,
+ctime TIMESTAMP WITH TIME ZONE NOT NULL,
+mtime TIMESTAMP WITH TIME ZONE NOT NULL,
+md5 TEXT NOT NULL,
+keywords tsvector
+)`,
+	`CREATE TABLE IF NOT EXISTS subkeys (
+rfingerprint TEXT NOT NULL,
+rsubfp TEXT NOT NULL
+)`,
+}
 
 var crIndexesSQL = []string{
 	`ALTER TABLE keys ADD CONSTRAINT keys_pk PRIMARY KEY (rfingerprint);`,
 	`ALTER TABLE keys ADD CONSTRAINT keys_md5 UNIQUE (md5);`,
-	`CREATE INDEX keys_rfp_idx ON keys(rfingerprint text_pattern_ops);`,
+	`CREATE INDEX keys_rfp ON keys(rfingerprint text_pattern_ops);`,
 	`CREATE INDEX keys_ctime ON keys (ctime);`,
 	`CREATE INDEX keys_mtime ON keys (mtime);`,
 	`CREATE INDEX keys_keywords ON keys USING gin(keywords);`,
+
+	`ALTER TABLE subkeys ADD CONSTRAINT subkeys_pk PRIMARY KEY (rsubfp);`,
+	`ALTER TABLE subkeys ADD CONSTRAINT subkeys_fk FOREIGN KEY (rfingerprint) REFERENCES keys(rfingerprint);`,
+	`CREATE INDEX subkeys_rfp ON subkeys(rsubfp text_pattern_ops);`,
 }
 
 var drConstraintsSQL = []string{
 	`ALTER TABLE keys DROP CONSTRAINT keys_pk;`,
 	`ALTER TABLE keys DROP CONSTRAINT keys_md5;`,
+	`DROP INDEX keys_rfp;`,
 	`DROP INDEX keys_ctime;`,
 	`DROP INDEX keys_mtime;`,
 	`DROP INDEX keys_keywords;`,
+
+	`ALTER TABLE subkeys DROP CONSTRAINT subkeys_pk;`,
+	`ALTER TABLE subkeys DROP CONSTRAINT subkeys_fk;`,
+	`DROP INDEX subkeys_rfp;`,
 }
 
 // Dial returns PostgreSQL storage connected to the given database URL.
@@ -101,9 +116,11 @@ func New(db *sql.DB) (hkpstorage.Storage, error) {
 }
 
 func (st *storage) createTables() error {
-	_, err := st.Exec(crTableSQL)
-	if err != nil {
-		return errgo.Mask(err)
+	for _, crTableSQL := range crTablesSQL {
+		_, err := st.Exec(crTableSQL)
+		if err != nil {
+			return errgo.Mask(err)
+		}
 	}
 	return nil
 }
@@ -167,6 +184,44 @@ func (st *storage) MatchMD5(md5s []string) ([]string, error) {
 func (st *storage) Resolve(keyids []string) (_ []string, retErr error) {
 	var result []string
 	sqlStr := "SELECT rfingerprint FROM keys WHERE rfingerprint LIKE $1 || '%'"
+	stmt, err := st.Prepare(sqlStr)
+	if err != nil {
+		return nil, errgo.Mask(err)
+	}
+	defer stmt.Close()
+
+	var subKeyIDs []string
+	for _, keyid := range keyids {
+		keyid = strings.ToLower(keyid)
+		if len(keyid) < maxFingerprintLen {
+			var rfp string
+			row := stmt.QueryRow(keyid)
+			err = row.Scan(&rfp)
+			if err == sql.ErrNoRows {
+				subKeyIDs = append(subKeyIDs, keyid)
+			} else if err != nil {
+				return nil, errgo.Mask(err)
+			}
+			result = append(result, rfp)
+		} else {
+			result = append(result, keyid)
+		}
+	}
+
+	if len(subKeyIDs) > 0 {
+		subKeyResult, err := st.resolveSubKeys(subKeyIDs)
+		if err != nil {
+			return nil, errgo.Mask(err)
+		}
+		result = append(result, subKeyResult...)
+	}
+
+	return result, nil
+}
+
+func (st *storage) resolveSubKeys(keyids []string) ([]string, error) {
+	var result []string
+	sqlStr := "SELECT rfingerprint FROM subkeys WHERE rsubfp LIKE $1 || '%'"
 	stmt, err := st.Prepare(sqlStr)
 	if err != nil {
 		return nil, errgo.Mask(err)
@@ -386,6 +441,13 @@ func (st *storage) Insert(keys []*openpgp.PrimaryKey) (n int, retErr error) {
 	}
 	defer stmt.Close()
 
+	subStmt, err := tx.Prepare("INSERT INTO subkeys (rfingerprint, rsubfp) " +
+		"SELECT $1::TEXT, $2::TEXT WHERE NOT EXISTS (SELECT 1 FROM subkeys WHERE rsubfp = $2)")
+	if err != nil {
+		return 0, errgo.Mask(err)
+	}
+	defer subStmt.Close()
+
 	var result hkpstorage.InsertError
 	for _, key := range keys {
 		openpgp.Sort(key)
@@ -404,6 +466,12 @@ func (st *storage) Insert(keys []*openpgp.PrimaryKey) (n int, retErr error) {
 		if err != nil {
 			result.Errors = append(result.Errors, errgo.Notef(err, "cannot insert rfp=%q", key.RFingerprint))
 			continue
+		}
+		for _, subKey := range key.SubKeys {
+			_, err = subStmt.Exec(&key.RFingerprint, &subKey.RFingerprint)
+			if err != nil {
+				result.Errors = append(result.Errors, errgo.Notef(err, "cannot insert rsubfp=%q", subKey.RFingerprint))
+			}
 		}
 		st.Notify(hkpstorage.KeyAdded{
 			Digest: key.MD5,
@@ -441,6 +509,14 @@ func (st *storage) Update(key *openpgp.PrimaryKey, lastMD5 string) (retErr error
 		&now, &key.MD5, &keyword, jsonBuf, &key.RFingerprint)
 	if err != nil {
 		return errgo.Mask(err)
+	}
+	for _, subKey := range key.SubKeys {
+		_, err := tx.Exec("INSERT INTO subkeys (rfingerprint, rsubfp) "+
+			"SELECT $1::TEXT, $2::TEXT WHERE NOT EXISTS (SELECT 1 FROM subkeys WHERE rsubfp = $2)",
+			&key.RFingerprint, &subKey.RFingerprint)
+		if err != nil {
+			return errgo.Mask(err)
+		}
 	}
 
 	st.Notify(hkpstorage.KeyReplaced{
