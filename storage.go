@@ -64,6 +64,7 @@ var crTableSQL = `CREATE TABLE IF NOT EXISTS keys (
 var crIndexesSQL = []string{
 	`ALTER TABLE keys ADD CONSTRAINT keys_pk PRIMARY KEY (rfingerprint);`,
 	`ALTER TABLE keys ADD CONSTRAINT keys_md5 UNIQUE (md5);`,
+	`CREATE INDEX keys_rfp_idx ON keys(rfingerprint text_pattern_ops);`,
 	`CREATE INDEX keys_ctime ON keys (ctime);`,
 	`CREATE INDEX keys_mtime ON keys (mtime);`,
 	`CREATE INDEX keys_keywords ON keys USING gin(keywords);`,
