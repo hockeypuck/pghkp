@@ -32,10 +32,10 @@ import (
 	_ "github.com/lib/pq"
 	"gopkg.in/errgo.v1"
 
-	"gopkg.in/hockeypuck/hkp.v0/jsonhkp"
-	hkpstorage "gopkg.in/hockeypuck/hkp.v0/storage"
+	"gopkg.in/hockeypuck/hkp.v1/jsonhkp"
+	hkpstorage "gopkg.in/hockeypuck/hkp.v1/storage"
 	log "gopkg.in/hockeypuck/logrus.v0"
-	"gopkg.in/hockeypuck/openpgp.v0"
+	"gopkg.in/hockeypuck/openpgp.v1"
 )
 
 const (
