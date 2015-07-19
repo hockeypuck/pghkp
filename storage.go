@@ -584,10 +584,6 @@ func (st *storage) Notify(change hkpstorage.KeyChange) error {
 }
 
 func (st *storage) RenotifyAll() error {
-	var result struct {
-		MD5 string `bson:"md5"`
-	}
-
 	sqlStr := fmt.Sprintf("SELECT md5 FROM keys")
 	rows, err := st.Query(sqlStr)
 	if err != nil {
@@ -596,7 +592,8 @@ func (st *storage) RenotifyAll() error {
 
 	defer rows.Close()
 	for rows.Next() {
-		err := rows.Scan(&result)
+		var md5 string
+		err := rows.Scan(&md5)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				return nil
@@ -604,7 +601,7 @@ func (st *storage) RenotifyAll() error {
 				return errgo.Mask(err)
 			}
 		}
-		st.Notify(hkpstorage.KeyAdded{Digest: result.MD5})
+		st.Notify(hkpstorage.KeyAdded{Digest: md5})
 	}
 	err = rows.Err()
 	return errgo.Mask(err)
