@@ -6,3 +6,9 @@ go:
     - "1.10"
     - tip
 
+addons:
+    postgresql: "10"
+    apt:
+        packages:
+            - postgresql-10
+
