@@ -3,6 +3,12 @@ language: go
 go:
     - 1.8
     - 1.9
-    - 1.10
+    - "1.10"
     - tip
+
+addons:
+    postgresql: "10"
+    apt:
+        packages:
+            - postgresql-10
 
