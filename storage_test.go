@@ -177,9 +177,10 @@ func (s *S) TestResolve(c *gc.C) {
 		// subkeys
 		"0xdb769d16cdb9ad53", "0xe9ebaf4195c1826c", "0x6cdc23d76cba8ca9",
 
-		// contiguous words and email addresses match
+		// contiguous words, usernames, domains and email addresses match
 		"casey", "marshall", "marshal", "casey+marshall", "cAseY+MArSHaLL",
-		"casey.marshall@gmail.com", "casey.marshall@gazzang.com"} {
+		"casey.marshall@gmail.com", "casey.marshall@gazzang.com",
+		"casey.marshall", "gmail.com"} {
 		comment := gc.Commentf("search=%s", search)
 		res, err = http.Get(s.srv.URL + "/pks/lookup?op=get&search=" + search)
 		c.Assert(err, gc.IsNil, comment)

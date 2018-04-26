@@ -534,7 +534,15 @@ func keywords(key *openpgp.PrimaryKey) []string {
 		s := strings.ToLower(uid.Keywords)
 		lbr, rbr := strings.Index(s, "<"), strings.LastIndex(s, ">")
 		if lbr != -1 && rbr > lbr {
-			m[s[lbr+1:rbr]] = true
+			email := s[lbr+1 : rbr]
+			m[email] = true
+
+			parts := strings.SplitN(email, "@", 2)
+			if len(parts) > 1 {
+				username, domain := parts[0], parts[1]
+				m[username] = true
+				m[domain] = true
+			}
 		}
 		if lbr != -1 {
 			fields := strings.FieldsFunc(s[:lbr], func(r rune) bool {
