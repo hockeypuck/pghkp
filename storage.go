@@ -40,6 +40,7 @@ import (
 
 const (
 	maxFingerprintLen = 40
+	maxInsertErrors   = 100
 )
 
 type storage struct {
@@ -420,10 +421,10 @@ func readOneKey(b []byte, rfingerprint string) (*openpgp.PrimaryKey, error) {
 	return result, nil
 }
 
-func (st *storage) Insert(keys []*openpgp.PrimaryKey) (n int, retErr error) {
+func (st *storage) insertKey(key *openpgp.PrimaryKey) (retErr error) {
 	tx, err := st.Begin()
 	if err != nil {
-		return 0, errgo.Mask(err)
+		return errgo.Mask(err)
 	}
 	defer func() {
 		if retErr != nil {
@@ -437,42 +438,53 @@ func (st *storage) Insert(keys []*openpgp.PrimaryKey) (n int, retErr error) {
 		"SELECT $1::TEXT, $2::TIMESTAMP, $3::TIMESTAMP, $4::TEXT, $5::JSONB, to_tsvector($6) " +
 		"WHERE NOT EXISTS (SELECT 1 FROM keys WHERE rfingerprint = $1)")
 	if err != nil {
-		return 0, errgo.Mask(err)
+		return errgo.Mask(err)
 	}
 	defer stmt.Close()
 
 	subStmt, err := tx.Prepare("INSERT INTO subkeys (rfingerprint, rsubfp) " +
 		"SELECT $1::TEXT, $2::TEXT WHERE NOT EXISTS (SELECT 1 FROM subkeys WHERE rsubfp = $2)")
 	if err != nil {
-		return 0, errgo.Mask(err)
+		return errgo.Mask(err)
 	}
 	defer subStmt.Close()
 
+	openpgp.Sort(key)
+
+	now := time.Now().UTC()
+	jsonKey := jsonhkp.NewPrimaryKey(key)
+	jsonBuf, err := json.Marshal(jsonKey)
+	if err != nil {
+		return errgo.Notef(err, "cannot serialize rfp=%q", key.RFingerprint)
+	}
+
+	jsonStr := string(jsonBuf)
+	keyword := strings.Join(keywords(key), " & ")
+	if _, err := stmt.Exec(&key.RFingerprint, &now, &now, &key.MD5, &jsonStr, &keyword); err != nil {
+		return errgo.Notef(err, "cannot insert rfp=%q", key.RFingerprint)
+	}
+	for _, subKey := range key.SubKeys {
+		if _, err := subStmt.Exec(&key.RFingerprint, &subKey.RFingerprint); err != nil {
+			return errgo.Notef(err, "cannot insert rsubfp=%q", subKey.RFingerprint)
+		}
+	}
+
+	return nil
+}
+
+func (st *storage) Insert(keys []*openpgp.PrimaryKey) (n int, retErr error) {
 	var result hkpstorage.InsertError
 	for _, key := range keys {
-		openpgp.Sort(key)
+		if count, max := len(result.Errors), maxInsertErrors; count > max {
+			result.Errors = append(result.Errors, errgo.Newf("too many insert errors (%d > %d), bailing...", count, max))
+			return n, result
+		}
 
-		now := time.Now().UTC()
-		jsonKey := jsonhkp.NewPrimaryKey(key)
-		jsonBuf, err := json.Marshal(jsonKey)
-		if err != nil {
-			result.Errors = append(result.Errors, errgo.Notef(err, "cannot serialize rfp=%q", key.RFingerprint))
+		if err := st.insertKey(key); err != nil {
+			result.Errors = append(result.Errors, err)
 			continue
 		}
 
-		jsonStr := string(jsonBuf)
-		keyword := strings.Join(keywords(key), " & ")
-		_, err = stmt.Exec(&key.RFingerprint, &now, &now, &key.MD5, &jsonStr, &keyword)
-		if err != nil {
-			result.Errors = append(result.Errors, errgo.Notef(err, "cannot insert rfp=%q", key.RFingerprint))
-			continue
-		}
-		for _, subKey := range key.SubKeys {
-			_, err = subStmt.Exec(&key.RFingerprint, &subKey.RFingerprint)
-			if err != nil {
-				result.Errors = append(result.Errors, errgo.Notef(err, "cannot insert rsubfp=%q", subKey.RFingerprint))
-			}
-		}
 		st.Notify(hkpstorage.KeyAdded{
 			Digest: key.MD5,
 		})
@@ -503,6 +515,9 @@ func (st *storage) Update(key *openpgp.PrimaryKey, lastMD5 string) (retErr error
 	now := time.Now().UTC()
 	jsonKey := jsonhkp.NewPrimaryKey(key)
 	jsonBuf, err := json.Marshal(jsonKey)
+	if err != nil {
+		return errgo.Notef(err, "cannot serialize rfp=%q", key.RFingerprint)
+	}
 	keyword := strings.Join(keywords(key), " & ")
 	_, err = tx.Exec("UPDATE keys SET mtime = $1, md5 = $2, keywords = to_tsvector($3), doc = $4 "+
 		"WHERE rfingerprint = $5",
